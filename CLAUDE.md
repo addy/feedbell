@@ -42,6 +42,7 @@ enough to read in one sitting.
 - `directories` for the state path.
 - `notify-rust` for notifications.
 - `anyhow` for errors.
+- `sha2` for the dedupe-key fallback hash.
 
 **Ask before adding any crate beyond these** (including dev-dependencies).
 
@@ -55,20 +56,29 @@ enough to read in one sitting.
 - Send conditional GETs using each feed's stored ETag and Last-Modified values; treat a 304 as
   "nothing new".
 - The dedupe key is the entry's id/GUID. If that is missing or empty, fall back to a SHA-256
-  hash of the link and title.
+  hash of the link and title. feed-rs generates its own ids for entries without one (random
+  when there is no link), so its id generator is turned off in `feed::parse`.
 - Isolate failures per feed: one broken feed must not stop the others. Record the error on the
   feed, and do not mark anything seen for a feed whose fetch failed.
 - Cap notifications at 5 per feed per poll. If there are more, send one summary notification
   such as "+12 more from <feed name>".
-- Mark items seen only after their notification has been sent.
+- Mark items seen only after their notification has been sent. Store a feed's new ETag and
+  Last-Modified only after all of its notifications went out, so a failure is retried rather
+  than hidden behind a 304.
 - Set a SQLite busy timeout so an overlapping manual `poll` and launchd `poll` do not fail.
 
 ## Notifications
 
 - Title is the feed name; body is the item title.
-- A notification from an unbundled CLI binary is attributed to another app's bundle ID, which
-  notify-rust / mac-notification-sys handles. This must work both from a terminal and when
-  launchd runs the binary. Test the launchd path early: it is the most likely thing to break.
+- feedbell is an unbundled CLI binary, so its notifications are attributed to another app's
+  bundle ID. We set this explicitly to `com.apple.Terminal` (`src/notify.rs`). Verified to
+  show banners both from a shell and under launchd. Notifications must be allowed for
+  Terminal in System Settings > Notifications, whichever terminal app is actually in use.
+  `com.apple.Finder` and Ghostty's bundle ID did not get a delivery confirmation from macOS.
+- notify-rust sends when the notification handle is dropped and discards errors, so there is
+  no delivery-failure signal. "Sent" means "handed to macOS". The one failure we can detect,
+  an unusable sender bundle ID, is checked explicitly.
+- Do not let notify-rust pick the sender itself: it runs an AppleScript lookup to do so.
 - Click-to-open is not part of v1 (see milestone 4).
 
 ## Milestones

@@ -3,9 +3,10 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use reqwest::StatusCode;
 use reqwest::Url;
 use reqwest::blocking::Client;
-use reqwest::header::{ETAG, HeaderMap, LAST_MODIFIED};
+use reqwest::header::{ETAG, HeaderMap, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED};
 use sha2::{Digest, Sha256};
 
 const USER_AGENT: &str = concat!(
@@ -77,23 +78,42 @@ pub fn http_client() -> Result<Client> {
         .context("building the HTTP client")
 }
 
-pub fn fetch(client: &Client, url: &str) -> Result<Fetched> {
-    let response = client
-        .get(url)
-        .send()
-        .with_context(|| format!("fetching {url}"))?
-        .error_for_status()?;
+pub enum FetchOutcome {
+    /// The server answered 304: nothing changed since the stored validators.
+    NotModified,
+    Fetched(Fetched),
+}
+
+/// GET a feed, conditionally when validators from an earlier fetch are given.
+pub fn fetch(
+    client: &Client,
+    url: &str,
+    etag: Option<&str>,
+    last_modified: Option<&str>,
+) -> Result<FetchOutcome> {
+    let mut request = client.get(url);
+    if let Some(etag) = etag {
+        request = request.header(IF_NONE_MATCH, etag);
+    }
+    if let Some(last_modified) = last_modified {
+        request = request.header(IF_MODIFIED_SINCE, last_modified);
+    }
+    let response = request.send().with_context(|| format!("fetching {url}"))?;
+    if response.status() == StatusCode::NOT_MODIFIED {
+        return Ok(FetchOutcome::NotModified);
+    }
+    let response = response.error_for_status()?;
     let etag = header(response.headers(), ETAG);
     let last_modified = header(response.headers(), LAST_MODIFIED);
     let body = response
         .bytes()
         .with_context(|| format!("reading the response from {url}"))?
         .to_vec();
-    Ok(Fetched {
+    Ok(FetchOutcome::Fetched(Fetched {
         body,
         etag,
         last_modified,
-    })
+    }))
 }
 
 fn header(headers: &HeaderMap, name: reqwest::header::HeaderName) -> Option<String> {

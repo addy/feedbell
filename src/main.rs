@@ -1,4 +1,6 @@
 mod feed;
+mod notify;
+mod poll;
 mod store;
 
 use std::path::PathBuf;
@@ -7,6 +9,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use directories::ProjectDirs;
 
+use feed::FetchOutcome;
 use store::{Feed, NewFeed, Store};
 
 /// Desktop notifications for new items in your RSS/Atom feeds.
@@ -33,15 +36,24 @@ enum Command {
         /// The feed's URL or name
         url_or_name: String,
     },
+    /// Check every feed once and notify about new items
+    Poll,
+    /// Send a sample notification to check that permissions work
+    TestNotify,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Command::TestNotify = cli.command {
+        return test_notify();
+    }
     let mut store = Store::open(&db_path()?)?;
     match cli.command {
+        Command::TestNotify => unreachable!(),
         Command::Add { url, name } => add(&mut store, &url, name.as_deref()),
         Command::List => list(&store),
         Command::Remove { url_or_name } => remove(&store, &url_or_name),
+        Command::Poll => poll(&store),
     }
 }
 
@@ -58,7 +70,10 @@ fn add(store: &mut Store, url: &str, name: Option<&str>) -> Result<()> {
         return Ok(());
     }
 
-    let fetched = feed::fetch(&feed::http_client()?, &url)?;
+    let FetchOutcome::Fetched(fetched) = feed::fetch(&feed::http_client()?, &url, None, None)?
+    else {
+        bail!("{url} answered 304 Not Modified to an unconditional request");
+    };
     let parsed = feed::parse(&fetched.body).with_context(|| format!("parsing {url}"))?;
 
     let name = name
@@ -123,6 +138,49 @@ fn list(store: &Store) -> Result<()> {
             w2 = widths[2],
         );
     }
+    Ok(())
+}
+
+fn poll(store: &Store) -> Result<()> {
+    let feeds = store.list_feeds()?;
+    let client = feed::http_client()?;
+    let mut new_items = 0;
+    let mut failed = 0;
+    for feed in &feeds {
+        // One broken feed must not stop the others: record the error and move on.
+        match poll::poll_feed(store, &client, feed, &mut notify::send) {
+            Ok(0) => {}
+            Ok(new) => {
+                new_items += new;
+                println!("{}: {new} new item(s)", feed.name);
+            }
+            Err(err) => {
+                failed += 1;
+                let message = format!("{err:#}");
+                eprintln!("{}: {message}", feed.name);
+                store.record_error(feed.id, &message)?;
+            }
+        }
+    }
+    println!(
+        "Checked {} feed(s): {new_items} new item(s), {failed} failed.",
+        feeds.len()
+    );
+    if failed > 0 {
+        bail!("{failed} feed(s) could not be checked; see `feedbell list`");
+    }
+    Ok(())
+}
+
+fn test_notify() -> Result<()> {
+    notify::send(
+        "feedbell",
+        "Test notification: if you can see this, it works.",
+    )?;
+    println!(
+        "Sent a test notification. If nothing appeared, allow notifications for Terminal in \
+         System Settings > Notifications."
+    );
     Ok(())
 }
 
