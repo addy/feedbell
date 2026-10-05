@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>No GUID Feed</title>
+    <link>https://noguid.example/</link>
+    <description>Items without usable GUIDs</description>
+    <item>
+      <title>Has link and title</title>
+      <link>https://noguid.example/a</link>
+    </item>
+    <item>
+      <title>Empty guid element</title>
+      <link>https://noguid.example/b</link>
+      <guid></guid>
+    </item>
+    <item>
+      <title>Title only</title>
+    </item>
+    <item>
+      <title>Has a real guid</title>
+      <link>https://noguid.example/d</link>
+      <guid>real-guid-d</guid>
+    </item>
+  </channel>
+</rss>

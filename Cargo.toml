@@ -1,0 +1,13 @@
+[package]
+name = "feedbell"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+directories = "6.0.0"
+feed-rs = "3.0.0"
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "rustls", "gzip"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+sha2 = "0.11.0"
