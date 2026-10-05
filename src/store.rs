@@ -10,7 +10,8 @@ use crate::feed::Item;
 
 /// Schema migrations, applied in order. `PRAGMA user_version` records how many have run, so
 /// only ever append to this list.
-const MIGRATIONS: &[&str] = &["
+const MIGRATIONS: &[&str] = &[
+    "
     CREATE TABLE feeds (
         id              INTEGER PRIMARY KEY,
         url             TEXT NOT NULL UNIQUE,
@@ -28,7 +29,9 @@ const MIGRATIONS: &[&str] = &["
         seen_at  INTEGER NOT NULL, -- unix seconds
         UNIQUE (feed_id, item_key)
     );
-"];
+",
+    "ALTER TABLE feeds ADD COLUMN muted INTEGER NOT NULL DEFAULT 0;",
+];
 
 /// A subscription.
 #[derive(Debug)]
@@ -36,6 +39,8 @@ pub struct Feed {
     pub id: i64,
     pub url: String,
     pub name: String,
+    /// A muted feed is still polled, but its new items are marked seen without notifying.
+    pub muted: bool,
     pub etag: Option<String>,
     pub last_modified: Option<String>,
     /// Local time, already formatted for display.
@@ -117,6 +122,14 @@ impl Store {
         Ok(())
     }
 
+    pub fn set_muted(&self, id: i64, muted: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE feeds SET muted = ?2 WHERE id = ?1",
+            params![id, muted],
+        )?;
+        Ok(())
+    }
+
     /// The current local time, formatted like the times in `list`.
     pub fn now_local(&self) -> Result<String> {
         let now = self
@@ -184,7 +197,7 @@ impl Store {
     }
 }
 
-const SELECT_FEED: &str = "SELECT id, url, name, etag, last_modified,
+const SELECT_FEED: &str = "SELECT id, url, name, muted, etag, last_modified,
     datetime(last_checked_at, 'unixepoch', 'localtime'), last_error FROM feeds";
 
 /// Ignores an item that is already seen, as an overlapping poll may have recorded it first.
@@ -202,10 +215,11 @@ fn row_to_feed(row: &rusqlite::Row) -> rusqlite::Result<Feed> {
         id: row.get(0)?,
         url: row.get(1)?,
         name: row.get(2)?,
-        etag: row.get(3)?,
-        last_modified: row.get(4)?,
-        last_checked: row.get(5)?,
-        last_error: row.get(6)?,
+        muted: row.get(3)?,
+        etag: row.get(4)?,
+        last_modified: row.get(5)?,
+        last_checked: row.get(6)?,
+        last_error: row.get(7)?,
     })
 }
 
@@ -296,6 +310,35 @@ mod tests {
         assert!(store.find_by_url("https://c.example/").unwrap().is_none());
         assert_eq!(store.find_by_name("BLOG").unwrap().len(), 2);
         assert!(store.find_by_name("other").unwrap().is_empty());
+    }
+
+    #[test]
+    fn feeds_start_unmuted_and_can_be_muted() {
+        let mut store = Store::open_in_memory().unwrap();
+        let id = store
+            .add_feed(&new_feed("https://example.com/feed", "Example"), &[])
+            .unwrap();
+        assert!(!store.list_feeds().unwrap()[0].muted);
+        store.set_muted(id, true).unwrap();
+        assert!(store.list_feeds().unwrap()[0].muted);
+        store.set_muted(id, false).unwrap();
+        assert!(!store.list_feeds().unwrap()[0].muted);
+    }
+
+    #[test]
+    fn migrates_a_database_from_an_older_version() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(MIGRATIONS[0]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO feeds (url, name) VALUES ('https://example.com/feed', 'Old');
+             PRAGMA user_version = 1;",
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        let store = Store { conn };
+        let feeds = store.list_feeds().unwrap();
+        assert_eq!(feeds[0].name, "Old");
+        assert!(!feeds[0].muted);
     }
 
     #[test]

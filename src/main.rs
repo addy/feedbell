@@ -1,14 +1,17 @@
 mod feed;
 mod launchd;
 mod notify;
+mod opml;
 mod poll;
 mod store;
 
 use std::io::IsTerminal;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use directories::ProjectDirs;
+use reqwest::blocking::Client;
 
 use feed::FetchOutcome;
 use store::{Feed, NewFeed, Store};
@@ -37,6 +40,20 @@ enum Command {
         /// The feed's URL or name
         url_or_name: String,
     },
+    /// Stop notifications from a feed without unsubscribing
+    Mute {
+        /// The feed's URL or name
+        url_or_name: String,
+    },
+    /// Resume notifications from a muted feed
+    Unmute {
+        /// The feed's URL or name
+        url_or_name: String,
+    },
+    /// Subscribe to every feed in an OPML file
+    Import { file: PathBuf },
+    /// Write subscriptions as OPML, to a file or to stdout
+    Export { file: Option<PathBuf> },
     /// Check every feed once and notify about new items
     Poll,
     /// Schedule `poll` with a launchd LaunchAgent
@@ -56,6 +73,10 @@ fn main() -> Result<()> {
         Command::Add { url, name } => add(&mut open_store()?, &url, name.as_deref()),
         Command::List => list(&open_store()?),
         Command::Remove { url_or_name } => remove(&open_store()?, &url_or_name),
+        Command::Mute { url_or_name } => set_muted(&open_store()?, &url_or_name, true),
+        Command::Unmute { url_or_name } => set_muted(&open_store()?, &url_or_name, false),
+        Command::Import { file } => import(&mut open_store()?, &file),
+        Command::Export { file } => export(&open_store()?, file.as_deref()),
         Command::Poll => poll(&open_store()?),
         Command::Install { interval } => launchd::install(interval),
         Command::Uninstall => launchd::uninstall(),
@@ -70,14 +91,19 @@ fn open_store() -> Result<Store> {
 }
 
 fn add(store: &mut Store, url: &str, name: Option<&str>) -> Result<()> {
+    subscribe(store, &feed::http_client()?, url, name)?;
+    Ok(())
+}
+
+/// Subscribe to one feed and report it. Returns false if it was already subscribed.
+fn subscribe(store: &mut Store, client: &Client, url: &str, name: Option<&str>) -> Result<bool> {
     let url = feed::normalize_url(url)?;
     if let Some(existing) = store.find_by_url(&url)? {
         println!("Already subscribed to {} ({url}).", existing.name);
-        return Ok(());
+        return Ok(false);
     }
 
-    let FetchOutcome::Fetched(fetched) = feed::fetch(&feed::http_client()?, &url, None, None)?
-    else {
+    let FetchOutcome::Fetched(fetched) = feed::fetch(client, &url, None, None)? else {
         bail!("{url} answered 304 Not Modified to an unconditional request");
     };
     let parsed = feed::parse(&fetched.body).with_context(|| format!("parsing {url}"))?;
@@ -102,6 +128,55 @@ fn add(store: &mut Store, url: &str, name: Option<&str>) -> Result<()> {
         "Subscribed to {name} ({url}). Marked {} existing item(s) as seen.",
         parsed.items.len()
     );
+    Ok(true)
+}
+
+fn import(store: &mut Store, file: &Path) -> Result<()> {
+    let opml =
+        std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+    let outlines = opml::parse(&opml).with_context(|| format!("parsing {}", file.display()))?;
+    if outlines.is_empty() {
+        bail!("no feeds found in {}", file.display());
+    }
+
+    let client = feed::http_client()?;
+    let (mut added, mut existing, mut failed) = (0, 0, 0);
+    for outline in &outlines {
+        // Like `add`, each feed is fetched first; a dead one must not stop the import.
+        match subscribe(store, &client, &outline.url, outline.name.as_deref()) {
+            Ok(true) => added += 1,
+            Ok(false) => existing += 1,
+            Err(err) => {
+                failed += 1;
+                eprintln!("Skipped {}: {err:#}", outline.url);
+            }
+        }
+    }
+    println!("Imported {added} feed(s); {existing} already subscribed, {failed} failed.");
+    if failed > 0 {
+        bail!("{failed} feed(s) could not be imported");
+    }
+    Ok(())
+}
+
+fn export(store: &Store, file: Option<&Path>) -> Result<()> {
+    let feeds = store.list_feeds()?;
+    let opml = opml::export(&feeds);
+    match file {
+        Some(file) => {
+            std::fs::write(file, opml).with_context(|| format!("writing {}", file.display()))?;
+            println!("Exported {} feed(s) to {}.", feeds.len(), file.display());
+        }
+        None => print!("{opml}"),
+    }
+    Ok(())
+}
+
+fn set_muted(store: &Store, url_or_name: &str, muted: bool) -> Result<()> {
+    let feed = find_feed(store, url_or_name)?;
+    store.set_muted(feed.id, muted)?;
+    let verb = if muted { "Muted" } else { "Unmuted" };
+    println!("{verb} {} ({}).", feed.name, feed.url);
     Ok(())
 }
 
@@ -112,37 +187,35 @@ fn list(store: &Store) -> Result<()> {
         return Ok(());
     }
 
-    let rows: Vec<[&str; 4]> = feeds
+    let header = ["NAME", "URL", "MUTED", "LAST CHECKED", "LAST ERROR"];
+    let rows: Vec<[&str; 5]> = feeds
         .iter()
         .map(|f| {
             [
                 f.name.as_str(),
                 f.url.as_str(),
+                if f.muted { "yes" } else { "-" },
                 f.last_checked.as_deref().unwrap_or("never"),
                 f.last_error.as_deref().unwrap_or("-"),
             ]
         })
         .collect();
-    let header = ["NAME", "URL", "LAST CHECKED", "LAST ERROR"];
-    let width = |col: usize| {
-        rows.iter()
-            .chain([&header])
-            .map(|row| row[col].chars().count())
-            .max()
-            .unwrap_or(0)
-    };
-    let widths = [width(0), width(1), width(2)];
+    // Pad every column but the last to its widest cell.
+    let widths: Vec<usize> = (0..header.len() - 1)
+        .map(|col| {
+            rows.iter()
+                .chain([&header])
+                .map(|row| row[col].chars().count())
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
     for row in [&header].into_iter().chain(&rows) {
-        println!(
-            "{:<w0$}  {:<w1$}  {:<w2$}  {}",
-            row[0],
-            row[1],
-            row[2],
-            row[3],
-            w0 = widths[0],
-            w1 = widths[1],
-            w2 = widths[2],
-        );
+        let mut line = String::new();
+        for (cell, width) in row.iter().zip(&widths) {
+            line.push_str(&format!("{cell:<width$}  "));
+        }
+        println!("{line}{}", row[header.len() - 1]);
     }
     Ok(())
 }
@@ -187,10 +260,18 @@ fn test_notify() -> Result<()> {
     notify::send(
         "feedbell",
         "Test notification: if you can see this, it works.",
+        Some("https://example.com/"),
     )?;
+    let (app, click) = match notify::terminal_notifier() {
+        Some(_) => ("terminal-notifier", "Clicking it should open example.com."),
+        None => (
+            "Terminal",
+            "Install terminal-notifier to make notifications open their link when clicked.",
+        ),
+    };
     println!(
-        "Sent a test notification. If nothing appeared, allow notifications for Terminal in \
-         System Settings > Notifications."
+        "Sent a test notification. {click}\nIf nothing appeared, allow notifications for {app} \
+         in System Settings > Notifications."
     );
     Ok(())
 }
@@ -202,7 +283,7 @@ fn remove(store: &Store, url_or_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Resolve a `remove` argument: an exact URL match wins, then a name match.
+/// Resolve a `<url-or-name>` argument: an exact URL match wins, then a name match.
 fn find_feed(store: &Store, url_or_name: &str) -> Result<Feed> {
     if let Ok(url) = feed::normalize_url(url_or_name)
         && let Some(feed) = store.find_by_url(&url)?
@@ -216,7 +297,7 @@ fn find_feed(store: &Store, url_or_name: &str) -> Result<Feed> {
         _ => {
             let urls: Vec<&str> = matches.iter().map(|f| f.url.as_str()).collect();
             bail!(
-                "'{url_or_name}' matches more than one subscription; remove by URL instead:\n  {}",
+                "'{url_or_name}' matches more than one subscription; use the URL instead:\n  {}",
                 urls.join("\n  ")
             )
         }

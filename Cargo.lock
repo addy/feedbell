@@ -702,6 +702,7 @@ dependencies = [
  "directories",
  "feed-rs",
  "notify-rust",
+ "quick-xml",
  "reqwest",
  "rusqlite",
  "sha2",

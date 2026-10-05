@@ -19,6 +19,12 @@ enough to read in one sitting.
 - `feedbell install [--interval <seconds>]` / `feedbell uninstall`: Write or remove a LaunchAgent
   so `poll` runs on a schedule. Default interval is 300 seconds.
 - `feedbell test-notify`: Send a sample notification to check that permissions work.
+- `feedbell mute <url-or-name>` / `feedbell unmute <url-or-name>`: A muted feed is still
+  polled, but its new items are marked seen without notifying, so unmuting never releases a
+  backlog.
+- `feedbell import <file>` / `feedbell export [file]`: OPML. Import subscribes to each feed
+  the way `add` does (fetch, validate, mark current items seen), flattens folders, and carries
+  on past feeds that fail. Export writes to stdout when no file is given.
 
 ## Architecture
 
@@ -48,12 +54,13 @@ enough to read in one sitting.
 - `notify-rust` for notifications.
 - `anyhow` for errors.
 - `sha2` for the dedupe-key fallback hash.
+- `quick-xml` for reading OPML (already in the build as a dependency of `feed-rs`).
 
 **Ask before adding any crate beyond these** (including dev-dependencies).
 
 ## Data model (starting point)
 
-- `feeds`: id, url (unique), name, etag, last_modified, last_checked_at, last_error.
+- `feeds`: id, url (unique), name, etag, last_modified, last_checked_at, last_error, muted.
 - `seen_items`: feed_id, item_key, title, link, seen_at; unique on (feed_id, item_key).
 
 ## Polling behavior
@@ -84,7 +91,16 @@ enough to read in one sitting.
   no delivery-failure signal. "Sent" means "handed to macOS". The one failure we can detect,
   an unusable sender bundle ID, is checked explicitly.
 - Do not let notify-rust pick the sender itself: it runs an AppleScript lookup to do so.
-- Click-to-open is not part of v1 (see milestone 4).
+- Click-to-open uses `terminal-notifier -open <url>` when it is installed (`brew install
+  terminal-notifier`). feedbell looks in `/opt/homebrew/bin` and `/usr/local/bin` first,
+  because launchd's PATH has neither. If it is missing or fails, the notify-rust path above
+  is the fallback, with no click action.
+- terminal-notifier needs its own permission in System Settings > Notifications. Unlike
+  notify-rust it exits non-zero on failure. `terminal-notifier -diagnose` explains why, and
+  `terminal-notifier -list ALL` shows what was delivered.
+- terminal-notifier rejects values that start with `[`, `-`, and similar, and strips one
+  leading backslash from every value, so title and message are always passed with one.
+- Only `http://` and `https://` links are passed to `-open`; the link comes from the feed.
 
 ## Milestones
 
@@ -93,14 +109,11 @@ Commit at the end of each one.
 1. Scaffolding, the SQLite store with migrations, and `add`, `list`, `remove`.
 2. `poll` with dedupe, conditional GET, notifications, the notification cap, and `test-notify`.
 3. `install` and `uninstall` with launchd, plus logging.
-4. Later: click-to-open notifications, OPML import and export, per-feed muting.
+4. Click-to-open notifications, OPML import and export, per-feed muting.
 
-### Click-to-open (later)
-
-Clicking a notification should open the item's link. Two options under consideration:
-
-- `terminal-notifier` with `-open <url>`.
-- Wrapping the binary in a minimal `.app` bundle.
+All four are done. For click-to-open, the alternative considered and rejected was wrapping the
+binary in a minimal `.app` bundle: a click would relaunch the app, which needs Objective-C
+delegate code to receive it.
 
 ## Quality bar
 

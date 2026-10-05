@@ -11,8 +11,8 @@ use crate::store::{Feed, Store};
 /// Individual notifications per feed per poll; anything beyond this is rolled into one summary.
 pub const MAX_NOTIFICATIONS: usize = 5;
 
-/// Sends a notification with a title and a body.
-pub type Notify<'a> = &'a mut dyn FnMut(&str, &str) -> Result<()>;
+/// Sends a notification with a title, a body, and a link to open when it is clicked.
+pub type Notify<'a> = &'a mut dyn FnMut(&str, &str, Option<&str>) -> Result<()>;
 
 /// Poll one feed and return how many new items it had. On error nothing about the fetch is
 /// recorded, so the next poll fetches the same content again and retries what is still unseen.
@@ -43,7 +43,8 @@ pub fn poll_feed(store: &Store, client: &Client, feed: &Feed, notify: Notify) ->
 }
 
 /// Notify about the items of `feed` not seen before, marking each seen only after its
-/// notification went out. Returns the number of new items.
+/// notification went out. Returns the number of items notified about. A muted feed's new
+/// items are marked seen quietly, so unmuting it later does not release a backlog.
 pub fn notify_new_items(
     store: &Store,
     feed: &Feed,
@@ -59,6 +60,13 @@ pub fn notify_new_items(
         }
     }
 
+    if feed.muted {
+        for item in &unseen {
+            store.mark_seen(feed.id, item)?;
+        }
+        return Ok(0);
+    }
+
     let (individual, rest) = unseen.split_at(unseen.len().min(MAX_NOTIFICATIONS));
     for item in individual {
         let body = item
@@ -66,13 +74,14 @@ pub fn notify_new_items(
             .as_deref()
             .or(item.link.as_deref())
             .unwrap_or("New item");
-        notify(&feed.name, body)?;
+        notify(&feed.name, body, item.link.as_deref())?;
         store.mark_seen(feed.id, item)?;
     }
     if !rest.is_empty() {
         notify(
             &feed.name,
             &format!("+{} more from {}", rest.len(), feed.name),
+            None,
         )?;
         for item in rest {
             store.mark_seen(feed.id, item)?;
@@ -123,7 +132,7 @@ mod tests {
         fail_from: Option<usize>,
     ) -> (Result<usize>, Vec<String>) {
         let mut sent = Vec::new();
-        let result = notify_new_items(store, feed, items, &mut |title, body| {
+        let result = notify_new_items(store, feed, items, &mut |title, body, _link| {
             assert_eq!(title, "Example");
             if fail_from.is_some_and(|n| sent.len() >= n) {
                 bail!("notification failed");
@@ -212,6 +221,38 @@ mod tests {
         let (result, sent) = run(&store, &feed, &[item(1), item(2), item(1)], None);
         assert_eq!(result.unwrap(), 2);
         assert_eq!(sent, ["Post 1", "Post 2"]);
+    }
+
+    #[test]
+    fn items_carry_their_link_and_the_summary_has_none() {
+        let (store, feed) = store_with_feed(&[]);
+        let mut links = Vec::new();
+        notify_new_items(&store, &feed, &items(0..7), &mut |_, _, link| {
+            links.push(link.map(str::to_string));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(links.len(), MAX_NOTIFICATIONS + 1);
+        assert_eq!(links[0].as_deref(), Some("https://example.com/0"));
+        assert_eq!(links[MAX_NOTIFICATIONS], None);
+    }
+
+    #[test]
+    fn a_muted_feed_marks_items_seen_without_notifying() {
+        let (store, feed) = store_with_feed(&[]);
+        store.set_muted(feed.id, true).unwrap();
+        let muted = store.list_feeds().unwrap().remove(0);
+        let (result, sent) = run(&store, &muted, &items(0..3), None);
+        assert_eq!(result.unwrap(), 0);
+        assert!(sent.is_empty());
+        assert_eq!(store.seen_count(feed.id), 3);
+
+        // Unmuting does not release the items that arrived while muted.
+        store.set_muted(feed.id, false).unwrap();
+        let unmuted = store.list_feeds().unwrap().remove(0);
+        let (result, sent) = run(&store, &unmuted, &items(0..4), None);
+        assert_eq!(result.unwrap(), 1);
+        assert_eq!(sent, ["Post 3"]);
     }
 
     #[test]

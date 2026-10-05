@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<opml version="2.0">
+  <head>
+    <title>Subscriptions</title>
+  </head>
+  <body>
+    <outline text="Example Blog" title="Example Blog" type="rss" xmlUrl="https://example.com/feed.xml" htmlUrl="https://example.com/"/>
+    <outline text="A folder" title="A folder">
+      <outline text="News and Views" title="News &amp; Views" type="rss" xmlUrl="https://news.example/rss?a=1&amp;b=2"/>
+      <outline text="Nested folder">
+        <outline text="Text only" type="atom" xmlUrl="https://text-only.example/atom"></outline>
+      </outline>
+    </outline>
+    <outline type="rss" xmlUrl="https://nameless.example/feed"/>
+    <outline text="No URL here" type="rss"/>
+  </body>
+</opml>
