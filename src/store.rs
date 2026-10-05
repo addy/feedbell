@@ -117,6 +117,14 @@ impl Store {
         Ok(())
     }
 
+    /// The current local time, formatted like the times in `list`.
+    pub fn now_local(&self) -> Result<String> {
+        let now = self
+            .conn
+            .query_row("SELECT datetime('now', 'localtime')", [], |row| row.get(0))?;
+        Ok(now)
+    }
+
     pub fn is_seen(&self, feed_id: i64, item_key: &str) -> Result<bool> {
         let seen = self.conn.query_row(
             "SELECT EXISTS (SELECT 1 FROM seen_items WHERE feed_id = ?1 AND item_key = ?2)",

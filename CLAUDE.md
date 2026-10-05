@@ -26,7 +26,12 @@ enough to read in one sitting.
   LaunchAgent plist in `~/Library/LaunchAgents` using `StartInterval`.
 - The plist references the binary's absolute path (via `std::env::current_exe`). Warn if that
   path is inside a cargo `target/` directory and suggest `cargo install --path .` first.
-- launchd stdout and stderr go to `~/Library/Logs/feedbell/`.
+- launchd stdout and stderr both go to `~/Library/Logs/feedbell/poll.log`. Lines are
+  timestamped. A scheduled poll with nothing new and no failures logs nothing, so the log
+  only grows with news; `list` shows when each feed was last checked. There is no rotation.
+- The LaunchAgent label is `local.feedbell.poll`. It sets `RunAtLoad`, so a poll runs at
+  install and at login rather than one interval later. The minimum interval is 60 seconds.
+- `install` over an existing install replaces it. `uninstall` leaves the database and logs.
 - Use `launchctl bootstrap gui/<uid>` and `launchctl bootout gui/<uid>`, not the deprecated
   `load`/`unload` commands.
 - State lives in SQLite at `~/Library/Application Support/feedbell/feedbell.db`. Find that path

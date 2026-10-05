@@ -1,9 +1,10 @@
 mod feed;
+mod launchd;
 mod notify;
 mod poll;
 mod store;
 
-use std::path::PathBuf;
+use std::io::IsTerminal;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -38,29 +39,34 @@ enum Command {
     },
     /// Check every feed once and notify about new items
     Poll,
+    /// Schedule `poll` with a launchd LaunchAgent
+    Install {
+        /// Seconds between polls
+        #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u32).range(60..))]
+        interval: u32,
+    },
+    /// Remove the LaunchAgent
+    Uninstall,
     /// Send a sample notification to check that permissions work
     TestNotify,
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
-    if let Command::TestNotify = cli.command {
-        return test_notify();
-    }
-    let mut store = Store::open(&db_path()?)?;
-    match cli.command {
-        Command::TestNotify => unreachable!(),
-        Command::Add { url, name } => add(&mut store, &url, name.as_deref()),
-        Command::List => list(&store),
-        Command::Remove { url_or_name } => remove(&store, &url_or_name),
-        Command::Poll => poll(&store),
+    match Cli::parse().command {
+        Command::Add { url, name } => add(&mut open_store()?, &url, name.as_deref()),
+        Command::List => list(&open_store()?),
+        Command::Remove { url_or_name } => remove(&open_store()?, &url_or_name),
+        Command::Poll => poll(&open_store()?),
+        Command::Install { interval } => launchd::install(interval),
+        Command::Uninstall => launchd::uninstall(),
+        Command::TestNotify => test_notify(),
     }
 }
 
-/// `~/Library/Application Support/feedbell/feedbell.db`
-fn db_path() -> Result<PathBuf> {
+/// Open the database at `~/Library/Application Support/feedbell/feedbell.db`.
+fn open_store() -> Result<Store> {
     let dirs = ProjectDirs::from("", "", "feedbell").context("could not find a home directory")?;
-    Ok(dirs.data_dir().join("feedbell.db"))
+    Store::open(&dirs.data_dir().join("feedbell.db"))
 }
 
 fn add(store: &mut Store, url: &str, name: Option<&str>) -> Result<()> {
@@ -144,6 +150,8 @@ fn list(store: &Store) -> Result<()> {
 fn poll(store: &Store) -> Result<()> {
     let feeds = store.list_feeds()?;
     let client = feed::http_client()?;
+    // Lines are timestamped because under launchd they land in a log file.
+    let now = store.now_local()?;
     let mut new_items = 0;
     let mut failed = 0;
     for feed in &feeds {
@@ -152,20 +160,23 @@ fn poll(store: &Store) -> Result<()> {
             Ok(0) => {}
             Ok(new) => {
                 new_items += new;
-                println!("{}: {new} new item(s)", feed.name);
+                println!("{now} {}: {new} new item(s)", feed.name);
             }
             Err(err) => {
                 failed += 1;
                 let message = format!("{err:#}");
-                eprintln!("{}: {message}", feed.name);
+                eprintln!("{now} {}: {message}", feed.name);
                 store.record_error(feed.id, &message)?;
             }
         }
     }
-    println!(
-        "Checked {} feed(s): {new_items} new item(s), {failed} failed.",
-        feeds.len()
-    );
+    // A scheduled poll that found nothing stays silent, so the log only grows with news.
+    if new_items > 0 || failed > 0 || std::io::stdout().is_terminal() {
+        println!(
+            "{now} Checked {} feed(s): {new_items} new item(s), {failed} failed.",
+            feeds.len()
+        );
+    }
     if failed > 0 {
         bail!("{failed} feed(s) could not be checked; see `feedbell list`");
     }
